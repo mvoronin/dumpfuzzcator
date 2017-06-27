@@ -1,0 +1,15 @@
+
+tables:
+  bundle_bundle:
+    first_name: "!first_name"
+    last_name: "!last_name"
+    dob: "!random<date>"
+    address1: "!random<string>"
+    address2: ""
+    city: "!random<string>"
+    region: "!random<string>"
+    order_id: "!random<int>"
+    fc_id: "!self:id"
+skip:
+  - django_admin_log
+  - django_session

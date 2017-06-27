@@ -1,0 +1,9 @@
+[package]
+name = "dumpfuzzcator"
+version = "0.1.0"
+authors = ["Michael Voronin <mvoronin.ru@gmail.com>"]
+
+[dependencies]
+rand = "0.3"
+rust-crypto = "0.2.36"
+yaml-rust = "*"
