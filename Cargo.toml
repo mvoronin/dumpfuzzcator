@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Michael Voronin <mvoronin.ru@gmail.com>"]
 
 [dependencies]
+clap = "2.25.0"
 rand = "0.3"
 rust-crypto = "0.2.36"
 yaml-rust = "*"

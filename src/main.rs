@@ -1,3 +1,4 @@
+extern crate clap;
 extern crate crypto;
 extern crate rand;
 extern crate yaml_rust;
@@ -11,11 +12,13 @@ use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fs::File;
+use std::process;
 use std::io;
 use std::io::Write;
 use std::io::BufReader;
 use std::io::BufRead;
-use std::io::prelude::*;
+
+use clap::{Arg, App};
 
 use yaml_rust::{YamlLoader, YamlEmitter};
 use yaml_rust::yaml;
@@ -25,6 +28,100 @@ enum State {
     Search,
     Handle
 }
+
+
+fn myread<RT: BufRead, WT:Write>(input: RT, mut output: WT) {
+    let mut state = State::Search;
+
+    let mut table_name = String::from("");
+    let ignore_tables: Vec<String> = vec![String::from("django_admin_log"), String::from("django_session")];
+    let mut columns: Vec<String> = Vec::new();
+
+    for o_line in input.lines() {
+        let str_line = match o_line {
+            Err(why) => {
+                println!("Couldn't read from STDIN! Reason: {}", why);
+                process::exit(0x0f00);
+            },
+            Ok(line) => line
+        };
+
+        let mut line: String = str_line.to_string();
+
+        match state {
+            State::Search => {
+                let line: String = str_line.to_string();
+
+                if line.len() >= 4 {
+                    if &line[..4] == "COPY" {
+                        let (table_name_, columns_) = parse_copy_statement(&line);
+                        table_name = table_name_;
+                        columns = columns_;
+
+                        if ignore_tables.contains(&table_name) {
+                            state = State::Skip;
+                        } else {
+                            state = State::Handle;
+                        }
+                    }
+                }
+
+                line.push_str("\r\n");
+
+                match output.write(line.as_bytes()) {
+                    Err(why) => {
+                        println!("Couldn't write to output! Reason: {}", why);
+                        process::exit(0x0f00);
+                    },
+                    Ok(_) => {}
+                }
+            },
+            State::Handle => {
+                if str_line == "\\." {
+                    state = State::Search;
+
+                    line.push_str("\r\n");
+
+                    match output.write(line.as_bytes()) {
+                        Err(why) => {
+                            println!("Couldn't write to output! Reason: {}", why);
+                            process::exit(0x0f00);
+                        },
+                        Ok(_) => {}
+                    }
+                } else {
+                    let row = handle_row(&table_name, &columns, &str_line);
+
+                    line.push_str("\r\n");
+
+                    match output.write(line.as_bytes()) {
+                        Err(why) => {
+                            println!("Couldn't write to output! Reason: {}", why);
+                            process::exit(0x0f00);
+                        },
+                        Ok(_) => {}
+                    }
+                }
+            }
+            State::Skip => {
+                if str_line == "\\." {
+                    state = State::Search;
+
+                    line.push_str("\r\n");
+
+                    match output.write(line.as_bytes()) {
+                        Err(why) => {
+                            println!("Couldn't write to output! Reason: {}", why);
+                            process::exit(0x0f00);
+                        },
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 fn parse_args(args: &Vec<String>) -> (Option<String>, Option<String>) {
     let mut ifilename:Option<String> = None;
@@ -164,6 +261,9 @@ fn parse_config() -> Vec<String> {
                 }
             }
         },
+        yaml::Yaml::Array(ref v) => {
+            panic!("Expected dictionary, get array");
+        },
         _ => {
             panic!("Expected dictionary");
         }
@@ -193,362 +293,92 @@ fn parse_config() -> Vec<String> {
     skip_tables
 }
 
-
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let matches = App::new("rewriter")
+        .version("1.0")
+        .about("PG SQL dump obfuscator!")
+        .author("Michael Voronin")
+        .arg(Arg::with_name("config")
+            .short("c")
+            .long("config")
+            .value_name("FILE")
+            .help("Sets a custom config file")
+            .takes_value(true)
+            .required(true))
+        .arg(Arg::with_name("input")
+            .short("i")
+            .long("input")
+            .value_name("FILE")
+            .help("Sets the input file")
+            .takes_value(true))
+        .arg(Arg::with_name("output")
+            .short("o")
+            .long("output")
+            .value_name("FILE")
+            .help("Sets the output file")
+            .takes_value(true))
+        .get_matches();
 
-    let ignore_tables: Vec<String> = vec![String::from("django_admin_log"), String::from("django_session")];
+    let path_config = matches.value_of("config").unwrap();
+    println!("{}", path_config);
 
     let mut owrp_ifile:Option<File> = None;
     let mut owrp_ofile:Option<File> = None;
 
-    let (owrp_ifilename, owrp_ofilename) = parse_args(&args);
+    let owrp_ifilename = matches.value_of("input");
+    let owrp_ofilename = matches.value_of("output");
 
     parse_config();
 
-
     if let Some(filename) = owrp_ifilename {
         match File::open(&filename) {
-            Err(why) => panic!("Couldn't open file \"{}\": {}", filename, why.description()),
+            Err(why) => {
+                println!("Couldn't open the file \"{}\". Reason: {}", filename, why.description());
+                process::exit(0x0f00);
+            },
             Ok(file) => { owrp_ifile = Some(file) },
         };
     }
 
     if let Some(filename) = owrp_ofilename {
         match File::create(&filename) {
-            Err(why) => panic!("Couldn't create {}: {}", filename, why.description()),
+            Err(why) => {
+                println!("Couldn't create the file \"{}\". Reason: {}", filename, why.description());
+                process::exit(0x0f00);
+            },
             Ok(file) => { owrp_ofile = Some(file) },
         }
     }
-
-    let mut state = State::Search;
 
     match owrp_ifile {
         Some(ifile) => {
             let ifilebuf = BufReader::new(&ifile);
 
-            let mut table_name = String::from("");
-            let mut columns: Vec<String> = Vec::new();
-
             match owrp_ofile {
-                Some(mut ofile) => {
-                    for owrp_line in ifilebuf.lines() {
-                        let str_line = match owrp_line {
-                            Err(why) => panic!("Couldn't read from file! Reason: {}", why),
-                            Ok(line) => line
-                        };
-
-                        match state {
-                            State::Search => {
-                                let line: String = str_line.to_string();
-
-                                if line.len() >= 4 {
-                                    if &line[..4] == "COPY" {
-                                        let (table_name_, columns_) = parse_copy_statement(&line);
-                                        table_name = table_name_;
-                                        columns = columns_;
-
-                                        if ignore_tables.contains(&table_name) {
-                                            state = State::Skip;
-                                        } else {
-                                            state = State::Handle;
-                                        }
-                                    }
-                                }
-
-                                match ofile.write(line.as_bytes()) {
-                                    Err(e) => panic!("Can't write to file: {}", e),
-                                    Ok(_) => {}
-                                }
-                                match ofile.write(b"\r\n") {
-                                    Err(e) => panic!("Can't write to file: {}", e),
-                                    Ok(_) => {}
-                                }
-                            },
-                            State::Handle => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match ofile.write(str_line.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                } else {
-                                    let row = handle_row(&table_name, &columns, &str_line);
-
-                                    match ofile.write(row.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            }
-                            State::Skip => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match ofile.write(str_line.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
+                Some(ofile) => {
+                    myread(ifilebuf, ofile);
                 },
                 None => {
                     let stdout = io::stdout();
-                    let mut handle = stdout.lock();
+                    let stdout_handle = stdout.lock();
 
-                    for line in ifilebuf.lines() {
-                        let str_line = match line {
-                            Err(why) => panic!("Couldn't read from file! Reason: {}", why),
-                            Ok(line) => line
-                        };
-
-                        match state {
-                            State::Search => {
-                                let line: String = str_line.to_string();
-
-                                if line.len() >= 4 {
-                                    if &line[..4] == "COPY" {
-                                        let (table_name_, columns_) = parse_copy_statement(&line);
-                                        table_name = table_name_;
-                                        columns = columns_;
-
-                                        if ignore_tables.contains(&table_name) {
-                                            state = State::Skip;
-                                        } else {
-                                            state = State::Handle;
-                                        }
-                                    }
-                                }
-
-                                match handle.write(line.as_bytes()) {
-                                    Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                    Ok(line) => line
-                                };
-                                match handle.write(b"\r\n") {
-                                    Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                    Ok(line) => line
-                                };
-                            },
-                            State::Handle => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match handle.write(str_line.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                    match handle.write(b"\r\n")  {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                } else {
-                                    let row = handle_row(&table_name, &columns, &str_line);
-
-                                    match handle.write(row.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                    match handle.write(b"\r\n") {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                }
-                            }
-                            State::Skip => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match handle.write(str_line.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                    match handle.write(b"\r\n")  {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(line) => line
-                                    };
-                                }
-                            }
-                        }
-                    }
+                    myread(ifilebuf, stdout_handle);
                 }
             }
         },
         None => {
             let stdin = io::stdin();
-
-            let mut table_name = String::from("");
-            let mut columns: Vec<String> = Vec::new();
+            let stdin_handle = stdin.lock();
 
             match owrp_ofile {
-                Some(mut ofile) => {
-                    for line in stdin.lock().lines() {
-                        let str_line = match line {
-                            Err(why) => panic!("Couldn't read from STDIN! Reason: {}", why),
-                            Ok(line) => line
-                        };
-
-                        match state {
-                            State::Search => {
-                                let line: String = str_line.to_string();
-
-                                if line.len() >= 4 {
-                                    if &line[..4] == "COPY" {
-                                        let (table_name_, columns_) = parse_copy_statement(&line);
-                                        table_name = table_name_;
-                                        columns = columns_;
-
-                                        if ignore_tables.contains(&table_name) {
-                                            state = State::Skip;
-                                        } else {
-                                            state = State::Handle;
-                                        }
-                                    }
-                                }
-
-                                match ofile.write(line.as_bytes()) {
-                                    Err(e) => panic!("Can't write to file: {}", e),
-                                    Ok(_) => {}
-                                }
-                                match ofile.write(b"\r\n") {
-                                    Err(e) => panic!("Can't write to file: {}", e),
-                                    Ok(_) => {}
-                                }
-                            },
-                            State::Handle => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match ofile.write(str_line.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                } else {
-                                    let row = handle_row(&table_name, &columns, &str_line);
-
-                                    match ofile.write(row.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            },
-                            State::Skip => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match ofile.write(str_line.as_bytes()) {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                    match ofile.write(b"\r\n") {
-                                        Err(e) => panic!("Can't write to file: {}", e),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
+                Some(ofile) => {
+                    myread(stdin_handle, ofile);
                 },
                 None => {
                     let stdout = io::stdout();
-                    let mut handle = stdout.lock();
+                    let stdout_handle = stdout.lock();
 
-                    for line in stdin.lock().lines() {
-                        let str_line = match line {
-                            Err(why) => panic!("Couldn't read from STDIN! Reason: {}", why),
-                            Ok(line) => line
-                        };
-
-                        match state {
-                            State::Search => {
-                                let line: String = str_line.to_string();
-
-                                if line.len() >= 4 {
-                                    if &line[..4] == "COPY" {
-                                        let (table_name_, columns_) = parse_copy_statement(&line);
-                                        table_name = table_name_;
-                                        columns = columns_;
-
-                                        if ignore_tables.contains(&table_name) {
-                                            state = State::Skip;
-                                        } else {
-                                            state = State::Handle;
-                                        }
-                                    }
-                                }
-
-                                match handle.write(line.as_bytes()) {
-                                    Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                    Ok(_) => {}
-                                }
-                                match handle.write(b"\r\n") {
-                                    Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                    Ok(_) => {}
-                                }
-                            },
-                            State::Handle => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match handle.write(str_line.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                    match handle.write(b"\r\n") {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                } else {
-                                    let row = handle_row(&table_name, &columns, &str_line);
-
-                                    match handle.write(row.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                    match handle.write(b"\r\n") {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            }
-                            State::Skip => {
-                                if str_line == "\\." {
-                                    state = State::Search;
-
-                                    match handle.write(str_line.as_bytes()) {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                    match handle.write(b"\r\n") {
-                                        Err(why) => panic!("Couldn't write to STDOUT! Reason: {}", why),
-                                        Ok(_) => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    myread(stdin_handle, stdout_handle);
                 }
             }
         }
